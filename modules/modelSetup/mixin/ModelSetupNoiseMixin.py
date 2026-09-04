@@ -147,7 +147,8 @@ class ModelSetupNoiseMixin(metaclass=ABCMeta):
                 TimestepDistribution.UNIFORM,
                 TimestepDistribution.LOGIT_NORMAL,
                 TimestepDistribution.HEAVY_TAIL,
-                TimestepDistribution.BETA
+                TimestepDistribution.BETA,
+                TimestepDistribution.STYLE_BIASED,
             ]:
                 # continuous implementations
                 if config.timestep_distribution == TimestepDistribution.UNIFORM:
@@ -169,6 +170,24 @@ class ModelSetupNoiseMixin(metaclass=ABCMeta):
                         device=generator.device,
                     )
                     u = 1.0 - u - scale * (torch.cos(math.pi / 2.0 * u) ** 2.0 - 1.0 + u)
+                    timestep = u * num_timestep + min_timestep
+                elif config.timestep_distribution == TimestepDistribution.STYLE_BIASED:
+                    # Ported from ai-toolkit's content_or_style='style' cubic sampling
+                    # (jobs/process/BaseSDTrainProcess.py, referencing arXiv:2302.08453 section 3.4),
+                    # which favors low-noise ("style") timesteps for training.
+                    # ai-toolkit expresses this as timestep_indices = (1 - u**3) * num_train_timesteps,
+                    # but that indexes into a *descending* diffusers scheduler.timesteps array, so a
+                    # large index there maps to a *small* actual (low-noise) timestep value.
+                    # OneTrainer has no such indirection: sigma = timestep / num_train_timesteps
+                    # increases directly with timestep (see ModelSetupFlowMatchingMixin._add_noise_discrete),
+                    # so biasing toward low noise here means biasing u toward 0 directly, i.e. u**3
+                    # (not 1 - u**3, which would bias toward high noise / "content" instead).
+                    u = torch.rand(
+                        size=(batch_size,),
+                        generator=generator,
+                        device=generator.device,
+                    )
+                    u = u.pow(3.0)
                     timestep = u * num_timestep + min_timestep
                 elif config.timestep_distribution == TimestepDistribution.BETA:
                     # B-TTDM Configuration
