@@ -164,6 +164,7 @@ class CloudTrainer(BaseTrainer):
         adjust(remote.transformer,"model_name", if_exists=True)
         adjust(remote,"output_model_destination")
         adjust(remote,"lora_model_name")
+        adjust(remote,"assistant_lora_model_name")
 
         adjust(remote.embedding,"model_name")
         for add_embedding in remote.additional_embeddings:

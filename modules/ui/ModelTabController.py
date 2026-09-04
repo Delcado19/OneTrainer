@@ -28,6 +28,9 @@ class ModelTabController:
             or model_type.is_hunyuan_video()
         )
 
+    def supports_assistant_lora(self) -> bool:
+        return self.train_config.model_type.is_z_image()
+
     def get_output_formats(self) -> list[tuple[str, ModelFormat]]:
         labels = {
             ModelFormat.SAFETENSORS: "Safetensors",

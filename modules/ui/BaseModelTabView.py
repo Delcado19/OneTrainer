@@ -34,6 +34,7 @@ class BaseModelTabView(ABC):
             allow_override_prior=model_type.is_stable_cascade(),
             has_transformer="transformer" in parts,
             allow_override_transformer=controller.supports_override_transformer(),
+            allow_assistant_lora=controller.supports_assistant_lora(),
             has_unconditional_transformer="unconditional_transformer" in parts,
             has_text_encoder=not model_type.has_multiple_text_encoders(),
             has_text_encoder_1=model_type.has_multiple_text_encoders(),
@@ -141,6 +142,7 @@ class BaseModelTabView(ABC):
             allow_override_prior: bool = False,
             has_transformer: bool = False,
             allow_override_transformer: bool = False,
+            allow_assistant_lora: bool = False,
             has_unconditional_transformer: bool = False,
             allow_override_text_encoder_4: bool = False,
             has_text_encoder: bool = False,
@@ -193,6 +195,16 @@ class BaseModelTabView(ABC):
                              tooltip="The transformer weight data type")
             self.components.options_kv(frame, row, 4, self.__create_dtype_options(include_gguf=True, include_a8=True, include_compressed=include_compressed),
                                   ui_state, "transformer.weight_dtype")
+
+            if allow_assistant_lora:
+                row += 1
+                self.components.label(frame, row, 0, "Assistant LoRA (Experimental)",
+                                 tooltip="Experimental and unproven. Z-Image only. Merges a de-distillation adapter into the transformer for training and inverts it only for internal sampling, not exported. Cannot be combined with Override Transformer / GGUF above; validation rejects that config.",
+                                 wide_tooltip=True)
+                self.components.path_entry(
+                    frame, row, 1, ui_state, "assistant_lora_model_name",
+                    mode="file", path_modifier=path_util.json_path_modifier
+                )
 
             row += 1
 

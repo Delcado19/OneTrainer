@@ -218,6 +218,7 @@ class BaseTrainingTabView(ABC):
         self.__create_transformer_frame(column_1, 1, ui_state, supports_guidance_scale=False, supports_force_attention_mask=False)
         self.__create_noise_frame(column_1, 2, ui_state, supports_dynamic_timestep_shifting=True)
 
+        self.__create_differential_guidance_frame(column_2, 0, ui_state)
         self.__create_masked_frame(column_2, 1, ui_state)
         self.__create_loss_frame(column_2, 2, controller, ui_state)
         self.__create_layer_frame(column_2, 3, controller, ui_state)
@@ -771,6 +772,18 @@ class BaseTrainingTabView(ABC):
             self.components.label(frame, 9, 0, "Dynamic Timestep Shifting",
                                   tooltip="Dynamically shift the timestep distribution based on resolution. If enabled, the shifting parameters are taken from the model's scheduler configuration and Timestep Shift is ignored. For Ideogram, the shifting instead follows the model's own resolution-aware sampling schedule. Note: For Z-Image, the dynamic shifting parameters are likely wrong and unknown. Use with care or set your own, fixed shift.", wide_tooltip=True)
             self.components.switch(frame, 9, 1, ui_state, "dynamic_timestep_shifting")
+
+    def __create_differential_guidance_frame(self, master, row, ui_state):
+        frame = self.components.section_frame(master, row)
+
+        self.components.label(frame, 0, 0, "Differential Guidance (Experimental)",
+                              tooltip="Experimental and unproven. Z-Image only. Rescales the training target before the existing loss, not a new loss function, to counteract Turbo distillation.",
+                              wide_tooltip=True)
+        self.components.switch(frame, 0, 1, ui_state, "differential_guidance")
+
+        self.components.label(frame, 1, 0, "Differential Guidance Scale",
+                              tooltip="How strongly the target is pulled away from the current prediction. The ai-toolkit default is 3.0.")
+        self.components.entry(frame, 1, 1, ui_state, "differential_guidance_scale", required=True)
 
     def __create_masked_frame(self, master, row, ui_state):
         frame = self.components.section_frame(master, row)

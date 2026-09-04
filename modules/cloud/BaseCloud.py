@@ -48,6 +48,8 @@ class BaseCloud(metaclass=ABCMeta):
             self.file_sync.sync_up(local=Path(self.config.transformer.local_model_name),remote=Path(self.config.transformer.model_name))
         if hasattr(self.config,"local_lora_model_name"):
             self.file_sync.sync_up(local=Path(self.config.local_lora_model_name),remote=Path(self.config.lora_model_name))
+        if hasattr(self.config,"local_assistant_lora_model_name"):
+            self.file_sync.sync_up(local=Path(self.config.local_assistant_lora_model_name),remote=Path(self.config.assistant_lora_model_name))
 
         if hasattr(self.config.embedding,"local_model_name"):
             self.file_sync.sync_up(local=Path(self.config.embedding.local_model_name),remote=Path(self.config.embedding.model_name))
