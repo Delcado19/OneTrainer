@@ -10,6 +10,7 @@ from modules.modelSetup.mixin.ModelSetupEmbeddingMixin import ModelSetupEmbeddin
 from modules.modelSetup.mixin.ModelSetupFlowMatchingMixin import ModelSetupFlowMatchingMixin
 from modules.modelSetup.mixin.ModelSetupNoiseMixin import ModelSetupNoiseMixin
 from modules.modelSetup.mixin.ModelSetupText2ImageMixin import ModelSetupText2ImageMixin
+from modules.modelSetup.z_image_distillation_util import apply_z_image_differential_guidance
 from modules.util.checkpointing_util import (
     enable_checkpointing_for_qwen3_encoder_layers,
     enable_checkpointing_for_z_image_transformer,
@@ -108,6 +109,13 @@ class BaseZImageSetup(
 
 
             flow = latent_noise - scaled_latent_image
+            if config.differential_guidance:
+                flow = apply_z_image_differential_guidance(
+                    predicted_flow,
+                    flow,
+                    config.differential_guidance_scale,
+                    batch.get("concept_type"),
+                )
             model_output_data = {
                 'loss_type': 'target',
                 'timestep': timestep,

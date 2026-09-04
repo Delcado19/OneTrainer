@@ -37,6 +37,7 @@ class PeftBase(nn.Module):
         self.is_applied = False
         self.layer_kwargs = {}
         self._initialized = False
+        self.multiplier = 1.0
 
         if orig_module is not None:
             match orig_module:
@@ -130,7 +131,7 @@ class PeftBase(nn.Module):
         pass
 
     @abstractmethod
-    def apply_to_module(self):
+    def apply_to_module(self, merge_weight: float = 1.0):
         pass
 
     @abstractmethod
@@ -212,7 +213,7 @@ class PeftBase(nn.Module):
             def remove_hook_from_module(self):
                 raise NotImplementedError("Should never be called on a dummy module.")
 
-            def apply_to_module(self):
+            def apply_to_module(self, merge_weight: float = 1.0):
                 raise NotImplementedError("Should never be called on a dummy module.")
 
             def extract_from_module(self, base_module: nn.Module):
@@ -289,9 +290,8 @@ class LoHaModule(PeftBase):
         W = (W1 * W2) * (self.alpha / self.rank)
         return self.op(x, W, bias=None, **self.layer_kwargs)
 
-    def apply_to_module(self):
-        # TODO
-        pass
+    def apply_to_module(self, merge_weight: float = 1.0):
+        raise NotImplementedError("LoRA merge only supports plain Linear LoRA modules")
 
     def extract_from_module(self, base_module: nn.Module):
         # TODO
@@ -523,9 +523,8 @@ class LoKrModule(PeftBase):
                 w = self.get_weight() * scale
                 return self.orig_forward(x) + self.op(x, w.to(x.dtype), bias=None, **self.layer_kwargs)
 
-    def apply_to_module(self):
-        # TODO
-        pass
+    def apply_to_module(self, merge_weight: float = 1.0):
+        raise NotImplementedError("LoRA merge only supports plain Linear LoRA modules")
 
     def extract_from_module(self, base_module: nn.Module):
         # TODO
@@ -578,11 +577,24 @@ class LoRAModule(PeftBase):
     def delta_forward(self, x, *args, **kwargs) -> Tensor | None:
         self.check_initialized()
         ld = self.lora_up(self.dropout(self.lora_down(x)))
-        return ld * (self.alpha / self.rank)
+        return ld * (self.alpha / self.rank) * self.multiplier
 
-    def apply_to_module(self):
-        # TODO
-        pass
+    def apply_to_module(self, merge_weight: float = 1.0):
+        if not self._initialized:
+            raise RuntimeError(f"Module {self.prefix} is not initialized.")
+        assert self.lora_down is not None
+        assert self.lora_up is not None
+        if not isinstance(self.orig_module, Linear) \
+                or not isinstance(self.lora_down, Linear) \
+                or not isinstance(self.lora_up, Linear):
+            raise NotImplementedError("LoRA merge only supports plain Linear LoRA modules")
+
+        delta_weight = self.lora_up.weight @ self.lora_down.weight
+        delta_weight = delta_weight * (self.alpha / self.rank) * merge_weight
+        with torch.no_grad():
+            self.orig_module.weight.add_(
+                delta_weight.to(device=self.orig_module.weight.device, dtype=self.orig_module.weight.dtype)
+            )
 
     def extract_from_module(self, base_module: nn.Module):
         # TODO
@@ -705,9 +717,8 @@ class OFTModule(PeftBase):
 
         return self.op(x, rotated_weight, self.orig_module.bias, **self.layer_kwargs)
 
-    def apply_to_module(self):
-        # TODO
-        pass
+    def apply_to_module(self, merge_weight: float = 1.0):
+        raise NotImplementedError("LoRA merge only supports plain Linear LoRA modules")
 
     def extract_from_module(self, base_module: nn.Module):
         # TODO
@@ -1106,12 +1117,22 @@ class LoRAModuleWrapper:
         for module in self.lora_modules.values():
             module.remove_hook_from_module()
 
-    def apply_to_module(self):
+    def apply_to_module(self, merge_weight: float = 1.0):
         """
         Applys the LoRA to the module, changing its weights
         """
         for module in self.lora_modules.values():
-            module.apply_to_module()
+            module.apply_to_module(merge_weight)
+
+    def set_multiplier(self, multiplier: float):
+        for module in self.lora_modules.values():
+            module.multiplier = multiplier
+
+    def multiplier(self) -> float:
+        return next(iter(self.lora_modules.values())).multiplier if self.lora_modules else 1.0
+
+    def is_applied(self) -> bool:
+        return any(module.is_applied for module in self.lora_modules.values())
 
     def extract_from_module(self, base_module: nn.Module):
         """

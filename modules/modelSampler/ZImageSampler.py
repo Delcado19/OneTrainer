@@ -47,7 +47,7 @@ class ZImageSampler(BaseModelSampler):
             noise_scheduler: NoiseScheduler,
             on_update_progress: Callable[[int, int], None] = lambda _, __: None,
     ) -> ModelSamplerOutput:
-        with self.model.autocast_context:
+        with self.model.autocast_context, self.model.inverse_assistant_lora_for_sampling():
             generator = torch.Generator(device=self.train_device)
             if random_seed:
                 generator.seed()

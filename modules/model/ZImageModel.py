@@ -1,5 +1,5 @@
 import math
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from random import Random
 
 from modules.model.BaseModel import BaseModel
@@ -48,6 +48,8 @@ class ZImageModel(BaseModel):
     # persistent lora training data
     text_encoder_lora: LoRAModuleWrapper | None
     transformer_lora: LoRAModuleWrapper | None
+    transformer_assistant_lora: LoRAModuleWrapper | None
+    assistant_lora_merged: bool
     lora_state_dict: dict | None
 
     def __init__(
@@ -72,7 +74,27 @@ class ZImageModel(BaseModel):
         self.transformer_offload_conductor = None
 
         self.transformer_lora = None
+        self.transformer_assistant_lora = None
+        self.assistant_lora_merged = False
         self.lora_state_dict = None
+
+    @contextmanager
+    def inverse_assistant_lora_for_sampling(self):
+        if self.transformer_assistant_lora is None or not self.assistant_lora_merged:
+            yield
+            return
+
+        was_applied = self.transformer_assistant_lora.is_applied()
+        previous_multiplier = self.transformer_assistant_lora.multiplier()
+        if not was_applied:
+            self.transformer_assistant_lora.hook_to_module()
+        self.transformer_assistant_lora.set_multiplier(-1.0)
+        try:
+            yield
+        finally:
+            self.transformer_assistant_lora.set_multiplier(previous_multiplier)
+            if not was_applied:
+                self.transformer_assistant_lora.remove_hook_from_module()
 
     def checkpoint_diffusers_to_comfy(self) -> list | None:
         # Full-model COMFY_TRANSFORMER conversion: Z-Image is the one model whose Comfy checkpoint layout

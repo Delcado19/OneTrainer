@@ -28,6 +28,7 @@ class BaseTrainer(
     def __init__(self, config: TrainConfig, callbacks: TrainCallbacks, commands: TrainCommands):
         super().__init__()
         self.config = config
+        self.config.validate()
         self.callbacks = callbacks
         self.commands = commands
         self.train_device = torch.device(self.config.train_device)

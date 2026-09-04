@@ -534,6 +534,7 @@ class TrainConfig(BaseConfig):
     # lora
     peft_type: PeftType
     lora_model_name: str
+    assistant_lora_model_name: str
     lora_rank: int
     lora_alpha: float
     lora_decompose: bool
@@ -593,7 +594,7 @@ class TrainConfig(BaseConfig):
     def __init__(self, data: list[(str, Any, type, bool)]):
         super().__init__(
             data,
-            config_version=11,
+            config_version=12,
             config_migrations={
                 0: self.__migration_0,
                 1: self.__migration_1,
@@ -606,6 +607,7 @@ class TrainConfig(BaseConfig):
                 8: self.__migration_8,
                 9: self.__migration_9,
                 10: self.__migration_10,
+                11: self.__migration_11,
             }
         )
 
@@ -865,6 +867,25 @@ class TrainConfig(BaseConfig):
 
         return migrated_data
 
+    def __migration_11(self, data: dict) -> dict:
+        migrated_data = data.copy()
+        migrated_data.setdefault("assistant_lora_model_name", "")
+        migrated_data.setdefault("differential_guidance", False)
+        migrated_data.setdefault("differential_guidance_scale", 3.0)
+        return migrated_data
+
+    def validate(self):
+        if self.differential_guidance and self.differential_guidance_scale <= 0:
+            raise ValueError("differential_guidance_scale must be > 0 when differential_guidance is enabled")
+
+        if self.assistant_lora_model_name:
+            if self.model_type != ModelType.Z_IMAGE:
+                raise ValueError("assistant_lora_model_name is only supported for Z-Image training")
+            if self.training_method != TrainingMethod.LORA or self.peft_type != PeftType.LORA:
+                raise ValueError("assistant_lora_model_name is only supported for plain LoRA training")
+            if self.transformer.model_name:
+                raise ValueError("assistant_lora_model_name cannot be combined with a separate transformer model override")
+
     def model_part_configs(self) -> list[TrainModelPartConfig]:
         # the per-part configs for the components this model_type actually has. Avoids "phantom" parts whose
         # fields keep their defaults (train=True) or migrated offload values but don't exist in the model.
@@ -901,6 +922,7 @@ class TrainConfig(BaseConfig):
             text_encoder_4=self.text_encoder_4.model_name,
             vae_model=self.vae.model_name,
             lora=self.lora_model_name,
+            assistant_lora=self.assistant_lora_model_name,
             embedding=EmbeddingName(self.embedding.uuid, self.embedding.model_name) \
                 if self.training_method == TrainingMethod.EMBEDDING else None,
             additional_embeddings=[EmbeddingName(embedding.uuid, embedding.model_name) for embedding in
@@ -1090,6 +1112,8 @@ class TrainConfig(BaseConfig):
         data.append(("loss_scaler", LossScaler.NONE, LossScaler, False))
         data.append(("learning_rate_scaler", LearningRateScaler.NONE, LearningRateScaler, False))
         data.append(("clip_grad_norm", 1.0, float, True))
+        data.append(("differential_guidance", False, bool, False))
+        data.append(("differential_guidance_scale", 3.0, float, False))
 
         # noise
         data.append(("offset_noise_weight", 0.0, float, False))
@@ -1228,6 +1252,7 @@ class TrainConfig(BaseConfig):
         # lora
         data.append(("peft_type", PeftType.LORA, PeftType, False))
         data.append(("lora_model_name", "", str, False))
+        data.append(("assistant_lora_model_name", "", str, False))
         data.append(("lora_rank", 16, int, False))
         data.append(("lora_alpha", 1.0, float, False))
         data.append(("lora_decompose", False, bool, False))

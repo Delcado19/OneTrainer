@@ -19,6 +19,7 @@ class ModelNames:
             text_encoder_4: str = "",
             vae_model: str = "",
             lora: str = "",
+            assistant_lora: str = "",
             embedding: EmbeddingName | None = None,
             additional_embeddings: list[EmbeddingName] | None = None,
             include_text_encoder: bool = True,
@@ -35,6 +36,7 @@ class ModelNames:
         self.text_encoder_4 = text_encoder_4
         self.vae_model = vae_model
         self.lora = lora
+        self.assistant_lora = assistant_lora
         self.embedding = embedding
         self.additional_embeddings = [] if additional_embeddings is None else additional_embeddings
         self.include_text_encoder = include_text_encoder
