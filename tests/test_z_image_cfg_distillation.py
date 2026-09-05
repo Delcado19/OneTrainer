@@ -132,6 +132,7 @@ class ZImageCfgDistillationTest(unittest.TestCase):
 
         wrapper.apply_to_module(1.0)
         merged = linear(x)
+        model.transformer = linear
         model.transformer_assistant_lora = wrapper
         model.assistant_lora_merged = True
         with model.inverse_assistant_lora_for_sampling():
@@ -141,6 +142,48 @@ class ZImageCfgDistillationTest(unittest.TestCase):
         self.assertTrue(torch.allclose(restored, baseline))
         self.assertFalse(wrapper.is_applied())
         self.assertEqual(wrapper.multiplier(), 1.0)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires CUDA")
+    def test_delta_forward_syncs_lora_device_to_input_on_every_call(self):
+        # Regression: lora_down/lora_up aren't registered submodules of orig_module, so
+        # per-layer offloading (moving orig_module to/from its compute device just-in-time
+        # around a call, e.g. for the assistant LoRA's unfiltered wrapper) never reaches
+        # them. A one-time sync when the LoRA hook is (re-)attached isn't enough -- observed
+        # in practice as: sampling prompt 1 succeeds, then offloading moves orig_module
+        # again before prompt 2's forward pass, which then crashes on a CPU/CUDA mismatch.
+        # So delta_forward must check on every call against where the input actually is.
+        linear = nn.Linear(1, 1, bias=False)
+        linear.weight.data.fill_(5.0)
+        wrapper = _linear_lora(linear)
+        wrapper.hook_to_module()
+        module = wrapper.lora_modules[""]
+
+        x_cuda = torch.tensor([[2.0]], device="cuda")
+        module.delta_forward(x_cuda)
+        self.assertEqual(module.lora_down.weight.device.type, "cuda")
+
+        # Simulates the offloader moving orig_module (and thus this call's input) back to
+        # CPU for a later call -- must re-sync rather than staying pinned to "cuda".
+        x_cpu = torch.tensor([[2.0]])
+        module.delta_forward(x_cpu)
+        self.assertEqual(module.lora_down.weight.device.type, "cpu")
+
+    def test_delta_forward_does_not_change_lora_dtype_for_quantized_orig_module(self):
+        # Regression: an earlier version of the device-sync fix above also synced dtype,
+        # which breaks LoRA math against a quantized orig_module -- e.g. torch has no CUDA
+        # kernel for dividing Float8_e4m3fn tensors, which this alpha/rank scaling does.
+        # delta_forward reads device from its own input, not from orig_module.weight, so it
+        # never observes the quantized dtype at all; assert the dtype-preservation directly.
+        linear = nn.Linear(1, 1, bias=False)
+        linear.weight.data.fill_(5.0)
+        wrapper = _linear_lora(linear)
+        wrapper.hook_to_module()
+        module = wrapper.lora_modules[""]
+
+        x = torch.tensor([[2.0]])
+        module.delta_forward(x)
+
+        self.assertEqual(module.lora_down.weight.dtype, torch.float32)
 
     def test_assistant_lora_parameters_are_absent_from_optimizer_parameters(self):
         model = ZImageModel(ModelType.Z_IMAGE)
@@ -152,6 +195,36 @@ class ZImageCfgDistillationTest(unittest.TestCase):
         assistant_param_ids = {id(parameter) for parameter in model.transformer_assistant_lora.parameters()}
 
         self.assertFalse(optimizer_param_ids & assistant_param_ids)
+
+    def test_assistant_lora_partial_module_coverage_does_not_raise(self):
+        # Real assistant-LoRA files (e.g. ostris/zimage_turbo_training_adapter) only cover a
+        # subset of the transformer's LoRA-eligible modules (they skip the embedders), while
+        # the wrapper built for merging is unfiltered ("full"). Regression for the crash this
+        # caused: LoRAModuleWrapper.load_state_dict used strict=True, so modules with no
+        # matching keys at all (not just individual missing tensors) raised instead of
+        # keeping their zero-initialized (no-op) lora_up.
+        class Transformer(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.proj_a = nn.Linear(1, 1, bias=False)
+                self.proj_b = nn.Linear(1, 1, bias=False)
+
+        transformer = Transformer()
+        config = TrainConfig.default_values()
+        config.lora_rank = 1
+        config.lora_alpha = 1.0
+        wrapper = LoRAModuleWrapper(transformer, "transformer", config)
+
+        partial_state_dict = {
+            "transformer.proj_a.alpha": torch.tensor(1.0),
+            "transformer.proj_a.lora_down.weight": torch.full((1, 1), 2.0),
+            "transformer.proj_a.lora_up.weight": torch.full((1, 1), 3.0),
+        }
+
+        wrapper.load_state_dict(partial_state_dict, strict=False)
+
+        self.assertTrue(torch.equal(wrapper.lora_modules["proj_a"].lora_down.weight, torch.full((1, 1), 2.0)))
+        self.assertTrue(torch.equal(wrapper.lora_modules["proj_b"].lora_up.weight, torch.zeros((1, 1))))
 
     def test_unrecognized_assistant_lora_key_format_is_clear(self):
         model = ZImageModel(ModelType.Z_IMAGE)

@@ -576,6 +576,16 @@ class LoRAModule(PeftBase):
 
     def delta_forward(self, x, *args, **kwargs) -> Tensor | None:
         self.check_initialized()
+        # lora_down/lora_up aren't registered submodules of orig_module, so per-layer
+        # offloading (moving orig_module to/from its compute device just-in-time around
+        # this call, e.g. for the assistant LoRA's unfiltered wrapper) never reaches them.
+        # A one-time sync at hook time isn't enough -- offloading can move orig_module
+        # again on a later call -- so check on every call against where x actually lives
+        # right now. Device only, never dtype: LoRA math must stay in a higher-precision
+        # dtype even when orig_module's weight is quantized (e.g. Float8_e4m3fn), which
+        # has no CUDA kernel for basic ops like division.
+        if self.lora_down.weight.device != x.device:
+            self.to(device=x.device)
         ld = self.lora_up(self.dropout(self.lora_down(x)))
         return ld * (self.alpha / self.rank) * self.multiplier
 

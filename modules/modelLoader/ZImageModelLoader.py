@@ -184,7 +184,12 @@ class ZImageModelLoader(
         if unknown:
             raise RuntimeError(f"Assistant LoRA contains keys that do not match Z-Image transformer modules: {unknown[:3]}")
 
-        model.transformer_assistant_lora.load_state_dict(state_dict)
+        # The assistant LoRA file only covers a subset of the transformer's LoRA-eligible
+        # modules (e.g. it skips the embedders); the wrapper above is built unfiltered, so
+        # strict=False lets modules with no matching keys stay at their zero-initialized
+        # (no-op) lora_up, instead of raising on missing keys for modules the file never
+        # touched. modules with keys still get validated their normal shapes.
+        model.transformer_assistant_lora.load_state_dict(state_dict, strict=False)
         model.transformer_assistant_lora.apply_to_module(1.0)
         model.assistant_lora_merged = True
 
