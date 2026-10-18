@@ -25,6 +25,7 @@ from transformers import (
     Qwen2Tokenizer,
     Qwen3ForCausalLM,
 )
+
 import huggingface_hub
 from safetensors.torch import load_file
 
@@ -169,6 +170,24 @@ class ZImageModelLoader(
         }
         if not module_names:
             raise RuntimeError("Assistant LoRA has no Z-Image transformer LoRA keys after normalization")
+
+        # Partial coverage is valid, but an incomplete tensor pair must never become a silent no-op merge.
+        up_names = {
+            key.removeprefix("transformer.").removesuffix(".lora_up.weight")
+            for key in state_dict
+            if key.startswith("transformer.") and key.endswith(".lora_up.weight")
+        }
+        if up_names != module_names:
+            raise RuntimeError("Assistant LoRA requires matching lora_down/lora_up tensor pairs")
+        for name in module_names:
+            down = state_dict[f"transformer.{name}.lora_down.weight"]
+            up = state_dict[f"transformer.{name}.lora_up.weight"]
+            if down.ndim != 2 or up.ndim != 2 or down.shape[0] <= 0 or up.shape[1] != down.shape[0]:
+                raise RuntimeError(f"Assistant LoRA has invalid tensor shapes for {name}")
+            for suffix in ("lora_down.weight", "lora_up.weight", "alpha"):
+                value = state_dict.get(f"transformer.{name}.{suffix}")
+                if value is not None and not torch.isfinite(value).all():
+                    raise RuntimeError(f"Assistant LoRA contains nonfinite values for {name}")
 
         rank = next(iter(state_dict[f"transformer.{name}.lora_down.weight"].shape[0] for name in module_names))
         if any(state_dict[f"transformer.{name}.lora_down.weight"].shape[0] != rank for name in module_names):

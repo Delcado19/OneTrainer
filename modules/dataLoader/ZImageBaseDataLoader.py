@@ -2,6 +2,7 @@ import os
 
 from modules.dataLoader.BaseDataLoader import BaseDataLoader
 from modules.dataLoader.mixin.DataLoaderText2ImageMixin import DataLoaderText2ImageMixin
+from modules.dataLoader.zImage.InjectTrigger import InjectTrigger
 from modules.model.BaseModel import BaseModel
 from modules.model.ZImageModel import PROMPT_MAX_LENGTH, ZImageModel, format_input
 from modules.modelSetup.BaseModelSetup import BaseModelSetup
@@ -13,6 +14,7 @@ from modules.util.TrainProgress import TrainProgress
 
 from mgds.pipelineModules.DecodeTokens import DecodeTokens
 from mgds.pipelineModules.DecodeVAE import DecodeVAE
+from mgds.pipelineModules.DropTags import DropTags
 from mgds.pipelineModules.EncodeQwenText import EncodeQwenText
 from mgds.pipelineModules.EncodeVAE import EncodeVAE
 from mgds.pipelineModules.PadMaskedTokens import PadMaskedTokens
@@ -30,6 +32,15 @@ class ZImageBaseDataLoader(
     BaseDataLoader,
     DataLoaderText2ImageMixin,
 ):
+    def _augmentation_modules(self, config: TrainConfig):
+        modules = super()._augmentation_modules(config)
+        if config.aitoolkit_trigger_word:
+            # Toolkit injects after shuffling, but full-caption dropout must still return an empty caption.
+            drop_tags = next(module for module in modules if isinstance(module, DropTags))
+            modules.remove(drop_tags)
+            modules.extend([InjectTrigger(config.aitoolkit_trigger_word), drop_tags])
+        return modules
+
     def _preparation_modules(self, config: TrainConfig, model: ZImageModel):
         rescale_image = RescaleImageChannels(image_in_name='image', image_out_name='image', in_range_min=0, in_range_max=1, out_range_min=-1, out_range_max=1)
         encode_image = EncodeVAE(in_name='image', out_name='latent_image_distribution', vae=model.vae, autocast_contexts=[model.autocast_context], dtype=model.train_dtype.torch_dtype())

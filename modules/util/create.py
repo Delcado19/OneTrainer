@@ -1120,9 +1120,15 @@ def create_lr_scheduler(
         approximate_epoch_length: int,
         gradient_accumulation_steps: int,
         global_step: int = 0,
+        optimizer_step: int | None = None,
 ) -> LRScheduler:
+    # Legacy backups lack this counter; newer runs count successful updates, including AMP skips.
+    last_epoch = (optimizer_step if optimizer_step is not None else int(global_step / gradient_accumulation_steps)) - 1
     steps_per_epoch = approximate_epoch_length
     total_steps = int(steps_per_epoch * num_epochs / gradient_accumulation_steps)
+    if config.max_train_steps:
+        # Scheduler progress follows the effective optimizer budget, including explicit ai-toolkit step limits.
+        total_steps = config.max_train_steps
 
     if warmup_steps > 1:   #values > 1 are literal step count
         warmup_steps = int(warmup_steps / gradient_accumulation_steps)
@@ -1203,18 +1209,18 @@ def create_lr_scheduler(
                         value = ast.literal_eval(value)
                 args[key] = value
             scheduler = klass(optimizer=optimizer,
-                              last_epoch=int(global_step / gradient_accumulation_steps) - 1,
+                              last_epoch=last_epoch,
                               **args)
             if warmup_steps > 0:
                 warmup_scheduler = LambdaLR(
                     optimizer=optimizer,
                     lr_lambda=lr_lambda_warmup(warmup_steps, lr_lambda_constant()),
-                    last_epoch=int(global_step / gradient_accumulation_steps) - 1)
+                    last_epoch=last_epoch)
                 scheduler = SequentialLR(
                     optimizer,
                     schedulers=[warmup_scheduler, scheduler],
                     milestones=[warmup_steps],
-                    last_epoch=int(global_step / gradient_accumulation_steps) - 1)
+                    last_epoch=last_epoch)
             return scheduler
         case _:
             lr_lambda = lr_lambda_constant()
@@ -1225,7 +1231,7 @@ def create_lr_scheduler(
     return LambdaLR(
         optimizer=optimizer,
         lr_lambda=lr_lambda,
-        last_epoch=int(global_step / gradient_accumulation_steps) - 1,
+        last_epoch=last_epoch,
     )
 
 

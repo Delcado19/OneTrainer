@@ -82,9 +82,10 @@ class SampleWindowController:
             else:
                 print("No backup found, loading without backup...")
 
-        if self.initial_train_config.quantization.cache_dir is None:
-            self.initial_train_config.quantization.cache_dir = self.initial_train_config.cache_dir + "/quantization"
-            os.makedirs(self.initial_train_config.quantization.cache_dir, exist_ok=True)
+        # See GenericTrainer.py: quantization.cache_dir is not exposed in the UI, so keep
+        # it in sync with cache_dir instead of only deriving it once while still None.
+        self.initial_train_config.quantization.cache_dir = self.initial_train_config.cache_dir + "/quantization"
+        os.makedirs(self.initial_train_config.quantization.cache_dir, exist_ok=True)
 
         model = model_loader.load(
             model_type=self.initial_train_config.model_type,

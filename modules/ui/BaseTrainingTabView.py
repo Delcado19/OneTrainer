@@ -342,6 +342,8 @@ class BaseTrainingTabView(ABC):
         self.components.label(frame, 6, 0, "Epochs",
                               tooltip="The number of epochs for a full training run")
         self.components.entry(frame, 6, 1, ui_state, "epochs", required=True)
+        self.components.label(frame, 6, 2, "Max Updates", tooltip="Stop after this many successful optimizer updates, including resumed updates. Overrides the epoch budget; 0 uses epochs.")
+        self.components.entry(frame, 6, 3, ui_state, "max_train_steps")
 
         # batch size
         self.components.label(frame, 7, 0, "Local Batch Size",
@@ -785,6 +787,49 @@ class BaseTrainingTabView(ABC):
                               tooltip="How strongly the target is pulled away from the current prediction. The ai-toolkit default is 3.0.")
         self.components.entry(frame, 1, 1, ui_state, "differential_guidance_scale", required=True)
 
+        for row, label, field, tooltip in (
+            (2, "ai-toolkit Guidance Semantics", "aitoolkit_guidance_semantics", "Apply Differential Guidance only when Guidance Loss is enabled, matching ai-toolkit. Leave off to preserve existing OneTrainer configs."),
+            (3, "Guidance Loss", "do_guidance_loss", "Extrapolate the flow target using a detached unconditional prediction."),
+            (4, "CFG-Zero Projection", "do_guidance_loss_cfg_zero", "Project the unconditional prediction onto the target before extrapolation."),
+            (8, "Class Output Preservation", "diff_output_preservation", "Add a separate loss preserving the frozen base prediction for trigger-to-class captions."),
+            (12, "Blank Output Preservation", "diff_output_preservation_blank", "Preserve the frozen base prediction for blank captions; mutually exclusive with class preservation."),
+            (14, "Blank Stabilization", "do_blank_stabilization", "Use zero source latents when the original training caption is empty."),
+        ):
+            self.components.label(frame, row, 0, label, tooltip=tooltip)
+            self.components.switch(frame, row, 1, ui_state, field)
+        for row, label, field in (
+            (5, "Guidance Target", "guidance_loss_target"),
+            (7, "Unconditional Prompt", "unconditional_prompt"),
+            (9, "Preservation Trigger", "diff_output_preservation_trigger"),
+            (10, "Preservation Class", "diff_output_preservation_class"),
+            (11, "Class Preservation Multiplier", "diff_output_preservation_multiplier"),
+            (13, "Blank Preservation Multiplier", "blank_prompt_preservation_multiplier"),
+        ):
+            self.components.label(frame, row, 0, label)
+            self.components.entry(frame, row, 1, ui_state, field)
+        self.components.label(frame, 6, 0, "Guidance Schedule")
+        self.components.options(frame, 6, 1, ["constant", "sigma"], ui_state, "guidance_loss_schedule")
+        self.components.label(frame, 15, 0, "ai-toolkit Timestep Semantics", tooltip="Align transformer conditioning with the noise sigma grid instead of the legacy zero-based conditioning.")
+        self.components.switch(frame, 15, 1, ui_state, "aitoolkit_timestep_semantics")
+        for row, label, field in (
+            (16, "Guidance Target Minimum", "guidance_loss_target_min"),
+            (17, "Guidance Target Maximum", "guidance_loss_target_max"),
+            (18, "Prediction Scale", "pred_scaler"),
+            (19, "Target Noise Multiplier", "target_noise_multiplier"),
+            (21, "Target Standard Deviation", "target_norm_std_value"),
+        ):
+            self.components.label(frame, row, 0, label)
+            self.components.entry(frame, row, 1, ui_state, field)
+        for row, label, field in (
+            (20, "Target Norm Std Loss", "target_norm_std"),
+            (22, "T0 Reconstruction Target", "t0_loss_target"),
+            (23, "T0 Velocity-Equivalent Weight", "t0_velocity_equiv_weight"),
+            (24, "FFT Magnitude Loss", "do_fft_loss"),
+            (25, "FFT Velocity-Equivalent Weight", "do_fft_velocity_equiv_weight"),
+        ):
+            self.components.label(frame, row, 0, label)
+            self.components.switch(frame, row, 1, ui_state, field)
+
     def __create_masked_frame(self, master, row, ui_state):
         frame = self.components.section_frame(master, row)
 
@@ -846,6 +891,8 @@ class BaseTrainingTabView(ABC):
         self.components.entry(frame, 3, 1, ui_state, "huber_strength", required=True)
 
         # Huber Delta
+        self.components.label(frame, 4, 2, "Pseudo-Huber Strength", tooltip="ai-toolkit smooth Huber objective with c=0.01. Set other loss strengths to zero for a pure pseudo-Huber objective.")
+        self.components.entry(frame, 4, 3, ui_state, "pseudo_huber_strength")
         self.components.label(frame, 4, 0, "Huber Delta",
                               tooltip="Delta parameter for huber loss")
         self.components.entry(frame, 4, 1, ui_state, "huber_delta", required=True)

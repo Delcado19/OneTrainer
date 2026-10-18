@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import uuid
 from copy import deepcopy
@@ -421,6 +422,7 @@ class TrainConfig(BaseConfig):
     learning_rate_cycles: float
     learning_rate_min_factor: float
     epochs: int
+    max_train_steps: int
     batch_size: int
     gradient_accumulation_steps: int
     ema: EMAMode
@@ -445,6 +447,44 @@ class TrainConfig(BaseConfig):
     loss_weight_fn: LossWeight
     loss_weight_strength: float
     dropout_probability: float #this is LoRA dropout!
+    lora_rank_dropout: float
+    lora_module_dropout: float
+    lora_conv_rank: int | None
+    lora_conv_alpha: float | None
+    lora_parameter_threshold: int
+    lora_include: str
+    lora_exclude: str
+    lora_full_rank: bool
+    lora_locon: bool
+    lora_use_cp: bool
+    lora_all_layers: bool
+    lora_full_include: str
+    do_guidance_loss: bool
+    guidance_loss_target: float
+    guidance_loss_target_min: float | None
+    guidance_loss_target_max: float | None
+    do_guidance_loss_cfg_zero: bool
+    guidance_loss_schedule: str
+    unconditional_prompt: str
+    aitoolkit_guidance_semantics: bool
+    aitoolkit_timestep_semantics: bool
+    aitoolkit_trigger_word: str
+    diff_output_preservation: bool
+    diff_output_preservation_trigger: str
+    diff_output_preservation_class: str
+    diff_output_preservation_multiplier: float
+    diff_output_preservation_blank: bool
+    blank_prompt_preservation_multiplier: float
+    do_blank_stabilization: bool
+    pred_scaler: float
+    target_noise_multiplier: float
+    target_norm_std: bool
+    target_norm_std_value: float
+    t0_loss_target: bool
+    t0_velocity_equiv_weight: bool
+    do_fft_loss: bool
+    do_fft_velocity_equiv_weight: bool
+    pseudo_huber_strength: float
     loss_scaler: LossScaler
     learning_rate_scaler: LearningRateScaler
     clip_grad_norm: float
@@ -875,8 +915,88 @@ class TrainConfig(BaseConfig):
         return migrated_data
 
     def validate(self):
-        if self.differential_guidance and self.differential_guidance_scale <= 0:
-            raise ValueError("differential_guidance_scale must be > 0 when differential_guidance is enabled")
+        if self.max_train_steps < 0:
+            raise ValueError("max_train_steps must be nonnegative; 0 disables the update limit")
+        if self.max_train_steps and self.optimizer.fused_back_pass:
+            raise ValueError("Exact update budgets do not support per-parameter fused optimizer steps")
+        if sum((self.lora_full_rank, self.lora_locon, self.lora_decompose)) > 1:
+            raise ValueError("Full-rank, LoCON and DoRA are mutually exclusive")
+        if (self.lora_full_rank or self.lora_locon or self.lora_use_cp) and self.peft_type != PeftType.LORA:
+            raise ValueError("Full-rank/LoCON options require the LoRA adapter type")
+        if self.lora_use_cp and not self.lora_locon:
+            raise ValueError("CP convolution requires LoCON")
+        if (self.lora_all_layers or self.lora_full_include) and self.peft_type != PeftType.LORA:
+            raise ValueError("Mixed full-delta modules require the LoRA adapter type")
+        if (self.lora_all_layers or self.lora_full_include) and self.output_model_format == ModelFormat.DIFFUSERS_LORA:
+            raise ValueError("Mixed full-delta modules require a native adapter format")
+        if self.lora_full_rank and self.lora_rank_dropout:
+            raise ValueError("Full-rank adapters do not support rank dropout")
+        if (self.lora_full_rank or self.lora_use_cp) and self.output_model_format == ModelFormat.DIFFUSERS_LORA:
+            raise ValueError("Full-rank/CP adapters require a native adapter format, not Diffusers PEFT")
+        if self.loss_weight_fn.name.startswith("AI_TOOLKIT_") and not self.model_type.is_flow_matching():
+            raise ValueError("ai-toolkit timestep loss weighting requires a flow-matching model")
+        if self.timestep_distribution.name.startswith("AI_TOOLKIT_") and not self.model_type.is_flow_matching():
+            raise ValueError("ai-toolkit fixed timesteps require a flow-matching model")
+        if self.differential_guidance and (
+                not math.isfinite(self.differential_guidance_scale) or self.differential_guidance_scale <= 0):
+            raise ValueError("differential_guidance_scale must be finite and > 0 when differential_guidance is enabled")
+
+        for field in ("lora_rank_dropout", "lora_module_dropout"):
+            value = getattr(self, field)
+            if not math.isfinite(value) or not 0 <= value < 1:
+                raise ValueError(f"{field} must be finite and in [0, 1)")
+        if (self.lora_rank_dropout or self.lora_module_dropout) and (
+                self.peft_type != PeftType.LORA or self.lora_decompose):
+            raise ValueError("Rank/module dropout currently requires plain LoRA")
+        if self.lora_conv_rank is not None and self.lora_conv_rank < 0:
+            raise ValueError("lora_conv_rank must be nonnegative or unset")
+        if self.lora_conv_alpha is not None and (
+                not math.isfinite(self.lora_conv_alpha) or self.lora_conv_alpha <= 0):
+            raise ValueError("lora_conv_alpha must be finite and positive or unset")
+        if self.lora_parameter_threshold < 0:
+            raise ValueError("lora_parameter_threshold must be nonnegative")
+        for field in ("lora_include", "lora_exclude", "lora_full_include"):
+            value = getattr(self, field)
+            if value and not value.isprintable():
+                raise ValueError(f"{field} must contain printable comma-separated substrings")
+
+        preservation = self.diff_output_preservation or self.diff_output_preservation_blank
+        if not isinstance(self.aitoolkit_trigger_word, str) or (
+                self.aitoolkit_trigger_word and not self.aitoolkit_trigger_word.strip()):
+            raise ValueError("aitoolkit_trigger_word must be a nonblank string or empty")
+        if self.aitoolkit_trigger_word and self.model_type != ModelType.Z_IMAGE:
+            raise ValueError("ai-toolkit caption trigger injection currently requires Z-Image")
+        if self.diff_output_preservation and self.diff_output_preservation_blank:
+            raise ValueError("Class and blank output preservation cannot be enabled together")
+        if self.diff_output_preservation and not self.diff_output_preservation_trigger.strip():
+            raise ValueError("Output preservation requires a nonempty trigger")
+        if self.diff_output_preservation and not self.diff_output_preservation_class.strip():
+            raise ValueError("Output preservation requires a nonempty class term")
+        for field in ("diff_output_preservation_multiplier", "blank_prompt_preservation_multiplier"):
+            value = getattr(self, field)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{field} must be finite and nonnegative")
+        if not math.isfinite(self.guidance_loss_target) or self.guidance_loss_target <= 0:
+            raise ValueError("guidance_loss_target must be finite and positive")
+        if self.guidance_loss_schedule not in ("constant", "sigma"):
+            raise ValueError("guidance_loss_schedule must be constant or sigma")
+        bounds = (self.guidance_loss_target_min, self.guidance_loss_target_max)
+        if any(value is not None for value in bounds) and (
+                any(value is None or not math.isfinite(value) or value <= 0 for value in bounds)
+                or bounds[0] > bounds[1]):
+            raise ValueError("Guidance target range requires finite positive min <= max")
+        for field in ("pred_scaler", "target_noise_multiplier", "target_norm_std_value", "pseudo_huber_strength"):
+            value = getattr(self, field)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{field} must be finite and nonnegative")
+        # These extra forwards use Z-Image's conditioning contract; never silently ignore options on other models.
+        if (preservation or self.do_guidance_loss or self.do_blank_stabilization
+                or self.pred_scaler != 1 or self.target_noise_multiplier != 1 or self.target_norm_std
+                or self.t0_loss_target or self.do_fft_loss):
+            if self.model_type != ModelType.Z_IMAGE or self.training_method != TrainingMethod.LORA:
+                raise ValueError("Output preservation/guidance/blank stabilization currently requires Z-Image LoRA")
+            if self.text_encoder.train:
+                raise ValueError("Output preservation/guidance requires a frozen text encoder")
 
         if self.assistant_lora_model_name:
             if self.model_type != ModelType.Z_IMAGE:
@@ -890,6 +1010,12 @@ class TrainConfig(BaseConfig):
         # the per-part configs for the components this model_type actually has. Avoids "phantom" parts whose
         # fields keep their defaults (train=True) or migrated offload values but don't exist in the model.
         return [getattr(self, name) for name in self.model_type.model_parts()]
+
+    def reached_max_train_steps(self, optimizer_step: int | None) -> bool:
+        """Use persisted successful updates, independent of microsteps and current accumulation."""
+        if self.max_train_steps and optimizer_step is None:
+            raise ValueError("Legacy backup has no optimizer update count; disable Max Updates or start a new run")
+        return self.max_train_steps > 0 and optimizer_step >= self.max_train_steps
 
     def weight_dtypes(self) -> ModelWeightDtypes:
         return ModelWeightDtypes(
@@ -1085,6 +1211,7 @@ class TrainConfig(BaseConfig):
         data.append(("learning_rate_cycles", 1.0, float, False))
         data.append(("learning_rate_min_factor", 0.0, float, False))
         data.append(("epochs", 100, int, False))
+        data.append(("max_train_steps", 0, int, False))
         data.append(("batch_size", 1, int, False))
         data.append(("gradient_accumulation_steps", 1, int, False))
         data.append(("ema", EMAMode.OFF, EMAMode, False))
@@ -1109,11 +1236,50 @@ class TrainConfig(BaseConfig):
         data.append(("loss_weight_fn", LossWeight.CONSTANT, LossWeight, False))
         data.append(("loss_weight_strength", 5.0, float, False))
         data.append(("dropout_probability", 0.0, float, False))
+        data.append(("lora_rank_dropout", 0.0, float, False))
+        data.append(("lora_module_dropout", 0.0, float, False))
+        data.append(("lora_conv_rank", None, int, True))
+        data.append(("lora_conv_alpha", None, float, True))
+        data.append(("lora_parameter_threshold", 0, int, False))
+        data.append(("lora_include", "", str, False))
+        data.append(("lora_exclude", "", str, False))
+        data.append(("lora_full_rank", False, bool, False))
+        data.append(("lora_locon", False, bool, False))
+        data.append(("lora_use_cp", False, bool, False))
+        data.append(("lora_all_layers", False, bool, False))
+        data.append(("lora_full_include", "", str, False))
         data.append(("loss_scaler", LossScaler.NONE, LossScaler, False))
         data.append(("learning_rate_scaler", LearningRateScaler.NONE, LearningRateScaler, False))
         data.append(("clip_grad_norm", 1.0, float, True))
         data.append(("differential_guidance", False, bool, False))
         data.append(("differential_guidance_scale", 3.0, float, False))
+        # Keep existing standalone Differential Guidance configs compatible; exact toolkit gating is opt-in.
+        data.append(("aitoolkit_guidance_semantics", False, bool, False))
+        data.append(("aitoolkit_timestep_semantics", False, bool, False))
+        data.append(("aitoolkit_trigger_word", "", str, False))
+        data.append(("do_guidance_loss", False, bool, False))
+        data.append(("guidance_loss_target", 3.0, float, False))
+        data.append(("guidance_loss_target_min", None, float, True))
+        data.append(("guidance_loss_target_max", None, float, True))
+        data.append(("do_guidance_loss_cfg_zero", False, bool, False))
+        data.append(("guidance_loss_schedule", "constant", str, False))
+        data.append(("unconditional_prompt", "", str, False))
+        data.append(("diff_output_preservation", False, bool, False))
+        data.append(("diff_output_preservation_trigger", "", str, False))
+        data.append(("diff_output_preservation_class", "person", str, False))
+        data.append(("diff_output_preservation_multiplier", 1.0, float, False))
+        data.append(("diff_output_preservation_blank", False, bool, False))
+        data.append(("blank_prompt_preservation_multiplier", 1.0, float, False))
+        data.append(("do_blank_stabilization", False, bool, False))
+        data.append(("pred_scaler", 1.0, float, False))
+        data.append(("target_noise_multiplier", 1.0, float, False))
+        data.append(("target_norm_std", False, bool, False))
+        data.append(("target_norm_std_value", 1.0, float, False))
+        data.append(("t0_loss_target", False, bool, False))
+        data.append(("t0_velocity_equiv_weight", False, bool, False))
+        data.append(("do_fft_loss", False, bool, False))
+        data.append(("do_fft_velocity_equiv_weight", False, bool, False))
+        data.append(("pseudo_huber_strength", 0.0, float, False))
 
         # noise
         data.append(("offset_noise_weight", 0.0, float, False))

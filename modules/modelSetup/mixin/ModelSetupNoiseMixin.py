@@ -139,6 +139,20 @@ class ModelSetupNoiseMixin(metaclass=ABCMeta):
                 device=generator.device,
             ).unsqueeze(0)
         else:
+            discrete_choices = {
+                TimestepDistribution.AI_TOOLKIT_ONE_STEP: [0],
+                TimestepDistribution.AI_TOOLKIT_TWO_STEP: [0, 499],
+                TimestepDistribution.AI_TOOLKIT_FOUR_STEP: [0, 250, 500, 750],
+                TimestepDistribution.AI_TOOLKIT_EIGHT_STEP: [0, 125, 250, 375, 500, 625, 750, 875],
+            }
+            if config.timestep_distribution in discrete_choices:
+                if num_train_timesteps != 1000:
+                    raise ValueError("ai-toolkit discrete schedules require 1000 training timesteps")
+                # ai-toolkit fixed schedules bypass the noise window and shift and index descending timesteps.
+                choices = torch.tensor(discrete_choices[config.timestep_distribution], device=generator.device)
+                selected = torch.randint(len(choices), (batch_size,), generator=generator, device=generator.device)
+                return (999 - choices[selected]).to(torch.long)
+
             min_timestep = int(num_train_timesteps * config.min_noising_strength)
             max_timestep = int(num_train_timesteps * config.max_noising_strength)
             num_timestep = max_timestep - min_timestep
@@ -149,6 +163,7 @@ class ModelSetupNoiseMixin(metaclass=ABCMeta):
                 TimestepDistribution.HEAVY_TAIL,
                 TimestepDistribution.BETA,
                 TimestepDistribution.STYLE_BIASED,
+                TimestepDistribution.CONTENT_BIASED,
             ]:
                 # continuous implementations
                 if config.timestep_distribution == TimestepDistribution.UNIFORM:
@@ -189,6 +204,11 @@ class ModelSetupNoiseMixin(metaclass=ABCMeta):
                     )
                     u = u.pow(3.0)
                     timestep = u * num_timestep + min_timestep
+                elif config.timestep_distribution == TimestepDistribution.CONTENT_BIASED:
+                    # ai-toolkit content samples low descending indices, hence high sigma in OneTrainer.
+                    u = torch.rand(batch_size, generator=generator, device=generator.device)
+                    # Float32 cubic subtraction can round to one; keep the final index inside the window.
+                    timestep = ((1.0 - u.pow(3.0)) * num_timestep + min_timestep).clamp(max=max_timestep - 1)
                 elif config.timestep_distribution == TimestepDistribution.BETA:
                     # B-TTDM Configuration
                     # Noising Weight -> Alpha

@@ -30,7 +30,7 @@ class PeftBase(nn.Module):
     layer_kwargs: dict  # Applied during the forward op() call.
     _initialized: bool  # Tracks whether we've created the layers or not.
 
-    def __init__(self, prefix: str, orig_module: nn.Module | None):
+    def __init__(self, prefix: str, orig_module: nn.Module | None, allow_full_weights: bool = False):
         super().__init__()
         self.prefix = prefix + '.'
         self._orig_module = [orig_module] if orig_module else None
@@ -52,7 +52,10 @@ class PeftBase(nn.Module):
                     self.layer_kwargs.setdefault("dilation", orig_module.dilation)
                     self.layer_kwargs.setdefault("groups", orig_module.groups)
                 case _:
-                    raise NotImplementedError("Only Linear and Conv2d are supported layers.")
+                    if not allow_full_weights:
+                        raise NotImplementedError("Only Linear and Conv2d are supported layers.")
+                    self.shape = orig_module.weight.shape
+                    self.op = orig_module.forward
 
     def hook_to_module(self):
         if not self.is_applied:
@@ -547,6 +550,8 @@ class LoRAModule(PeftBase):
 
         self.rank = rank
         self.dropout = Dropout(0)
+        self.rank_dropout = 0.0
+        self.module_dropout = 0.0
         self.register_buffer("alpha", torch.tensor(alpha))
         self.lora_down = None
         self.lora_up = None
@@ -569,7 +574,8 @@ class LoRAModule(PeftBase):
 
     def forward(self, x, *args, **kwargs):
         self.check_initialized()
-        if isinstance(self.orig_module, BaseLinearSVD):
+        # The fused SVD forward only knows neuron dropout; use the generic delta for rank/module masks.
+        if type(self) is LoRAModule and isinstance(self.orig_module, BaseLinearSVD) and not (self.rank_dropout or self.module_dropout):
             return self.orig_module.forward_with_lora(x, self.lora_down, self.lora_up, self.dropout, self.alpha)
 
         return self.orig_forward(x) + self.delta_forward(x, *args, **kwargs)
@@ -586,8 +592,27 @@ class LoRAModule(PeftBase):
         # has no CUDA kernel for basic ops like division.
         if self.lora_down.weight.device != x.device:
             self.to(device=x.device)
-        ld = self.lora_up(self.dropout(self.lora_down(x)))
-        return ld * (self.alpha / self.rank) * self.multiplier
+        if self.training and self.module_dropout and torch.rand(1, device=x.device) < self.module_dropout:
+            hidden = self.lora_down(x)
+            if getattr(self, "lora_mid", None) is not None:
+                hidden = self.lora_mid(hidden)
+            # Keep backward valid even when every adapter is dropped and the base is frozen.
+            return self.lora_up(hidden) * 0
+        hidden = self.lora_down(x)
+        if getattr(self, "lora_mid", None) is not None:
+            hidden = self.lora_mid(hidden)
+        hidden = self.dropout(hidden)
+        scale = self.alpha / self.rank
+        if self.training and self.rank_dropout:
+            # ai-toolkit drops whole rank channels per sample, sharing the mask over tokens/pixels.
+            mask = torch.rand((hidden.shape[0], self.rank), device=hidden.device) > self.rank_dropout
+            if hidden.ndim == 3:
+                mask = mask.unsqueeze(1)
+            elif hidden.ndim == 4:
+                mask = mask.unsqueeze(-1).unsqueeze(-1)
+            hidden = hidden * mask
+            scale = scale / (1.0 - self.rank_dropout)
+        return self.lora_up(hidden) * scale * self.multiplier * getattr(self, "scalar", 1.0)
 
     def apply_to_module(self, merge_weight: float = 1.0):
         if not self._initialized:
@@ -609,6 +634,134 @@ class LoRAModule(PeftBase):
     def extract_from_module(self, base_module: nn.Module):
         # TODO
         pass
+
+
+class FullDeltaModule(PeftBase):
+    """Zero-initialized weight/bias deltas, serialized with ai-toolkit/Comfy .diff suffixes."""
+
+    def __init__(self, prefix: str, orig_module: nn.Module | None):
+        super().__init__(prefix, orig_module, allow_full_weights=True)
+        self.dropout = Dropout(0)
+        if orig_module is not None:
+            weight = orig_module._parameters.get("weight")
+            if type(weight) is not Parameter or "quantized" in type(orig_module).__module__ or weight.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+                raise ValueError(f"Full-delta adapter does not support quantized weights: {prefix}")
+            self.initialize_weights()
+
+    def initialize_weights(self):
+        self.diff = Parameter(torch.zeros_like(self.orig_module.weight))
+        bias = self.orig_module._parameters.get("bias")
+        self.diff_b = Parameter(torch.zeros_like(bias)) if bias is not None else None
+        self._initialized = True
+
+    def forward(self, x, *args, **kwargs):
+        self.check_initialized()
+        module = self.orig_module
+        weight = module._parameters["weight"]
+        bias = module._parameters.get("bias")
+        # Match toolkit's weight-space delta without permanently mutating the frozen base or losing autograd.
+        module._parameters["weight"] = weight + (self.diff.to(weight.device) * self.multiplier).to(weight.dtype)
+        if self.diff_b is not None:
+            module._parameters["bias"] = bias + (self.diff_b.to(bias.device) * self.multiplier).to(bias.dtype)
+        try:
+            return self.orig_forward(x, *args, **kwargs)
+        finally:
+            module._parameters["weight"] = weight
+            if self.diff_b is not None:
+                module._parameters["bias"] = bias
+
+    def apply_to_module(self, merge_weight: float = 1.0):
+        self.check_initialized()
+        with torch.no_grad():
+            self.orig_module.weight.add_(self.diff.to(self.orig_module.weight) * merge_weight)
+            if self.diff_b is not None:
+                self.orig_module.bias.add_(self.diff_b.to(self.orig_module.bias) * merge_weight)
+
+    def extract_from_module(self, base_module: nn.Module):
+        self.check_initialized()
+        with torch.no_grad():
+            self.diff.copy_(self.orig_module.weight - base_module.weight)
+            if self.diff_b is not None:
+                self.diff_b.copy_(self.orig_module.bias - base_module.bias)
+
+
+class FullRankModule(LoRAModule):
+    """ai-toolkit fullrank: dense Kaiming delta, identity up, configured alpha/rank scaling."""
+
+    def initialize_weights(self):
+        self._initialized = True
+        layer = self.orig_module
+        if isinstance(layer, Linear):
+            self.lora_down = Linear(layer.in_features, layer.out_features, bias=False, device=layer.weight.device)
+        else:
+            self.lora_down = Conv2d(layer.in_channels, layer.out_channels, layer.kernel_size, layer.stride,
+                                   layer.padding, dilation=layer.dilation, groups=layer.groups,
+                                   bias=False, device=layer.weight.device)
+        nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
+        self.lora_up = nn.Identity()
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        diff_key = self.prefix + "diff"
+        if diff_key in state_dict:
+            if self.prefix + "lora_down.weight" in state_dict or self.prefix + "diff_b" in state_dict:
+                raise ValueError("Full-rank .diff import cannot contain a second dense projection or bias delta")
+            if not torch.isfinite(self.alpha).all() or self.alpha.item() == 0:
+                raise ValueError("Full-rank .diff import requires finite nonzero configured alpha")
+            # External dense deltas already include alpha/rank; undo it for this trainable parameterization.
+            state_dict = dict(state_dict)
+            state_dict[self.prefix + "lora_down.weight"] = state_dict.pop(diff_key) * self.rank / self.alpha
+            state_dict[self.prefix + "alpha"] = self.alpha
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
+
+    def apply_to_module(self, merge_weight: float = 1.0):
+        self.check_initialized()
+        with torch.no_grad():
+            delta = self.lora_down.weight * (self.alpha / self.rank) * merge_weight
+            self.orig_module.weight.add_(delta.to(self.orig_module.weight))
+
+
+class LoConModule(LoRAModule):
+    """Toolkit LoCON uses two initialized projections gated by a trainable zero scalar."""
+
+    def __init__(self, *args, use_cp: bool = False, **kwargs):
+        self.use_cp = use_cp
+        super().__init__(*args, **kwargs)
+        self.scalar = Parameter(torch.zeros((), device=self.alpha.device))
+
+    def initialize_weights(self):
+        self._initialized = True
+        self.lora_mid = None
+        layer = self.orig_module
+        if self.use_cp and isinstance(layer, Conv2d) and layer.kernel_size != (1, 1):
+            if layer.groups != 1:
+                raise ValueError("LoCON CP convolution requires groups=1")
+            self.lora_down = Conv2d(layer.in_channels, self.rank, 1, bias=False, device=layer.weight.device)
+            self.lora_mid = Conv2d(self.rank, self.rank, layer.kernel_size, layer.stride, layer.padding,
+                                  dilation=layer.dilation, bias=False, device=layer.weight.device)
+            self.lora_up = Conv2d(self.rank, layer.out_channels, 1, bias=False, device=layer.weight.device)
+        else:
+            self.lora_down, self.lora_up = self.create_layer()
+        nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
+        nn.init.kaiming_uniform_(self.lora_up.weight)
+        if self.lora_mid is not None:
+            nn.init.kaiming_uniform_(self.lora_mid.weight)
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        local = {k.removeprefix(self.prefix): v for k, v in state_dict.items() if k.startswith(self.prefix)}
+        # External LyCORIS exports fold the scalar into up; internal backups retain it for exact resume.
+        local.setdefault("scalar", torch.ones_like(self.scalar))
+        return nn.Module.load_state_dict(self, local, strict=strict, assign=assign)
+
+    def apply_to_module(self, merge_weight: float = 1.0):
+        self.check_initialized()
+        if self.lora_mid is not None:
+            delta = torch.einsum("or,rsxy,si->oixy", self.lora_up.weight[:, :, 0, 0],
+                                 self.lora_mid.weight, self.lora_down.weight[:, :, 0, 0])
+        else:
+            delta = self.make_weight(self.lora_down.weight, self.lora_up.weight)
+        with torch.no_grad():
+            delta = delta * (self.alpha / self.rank) * self.scalar * merge_weight
+            self.orig_module.weight.add_(delta.to(self.orig_module.weight))
 
 
 class OFTModule(PeftBase):
@@ -893,7 +1046,17 @@ class LoRAModuleWrapper:
         ]
 
         if self.peft_type == PeftType.LORA:
-            if config.lora_decompose:
+            if config.lora_full_rank:
+                self.klass = FullRankModule
+                self.dummy_klass = FullRankModule.make_dummy()
+                self.additional_args = [self.rank, self.alpha]
+                self.additional_kwargs = {}
+            elif config.lora_locon:
+                self.klass = LoConModule
+                self.dummy_klass = LoConModule.make_dummy()
+                self.additional_args = [self.rank, self.alpha]
+                self.additional_kwargs = {"use_cp": config.lora_use_cp}
+            elif config.lora_decompose:
                 self.klass = DoRAModule
                 self.dummy_klass = DummyDoRAModule
                 self.additional_args = [self.rank, self.alpha]
@@ -950,14 +1113,33 @@ class LoRAModuleWrapper:
         unsuitable = []
         oft_adjustments = []
 
+        included = [part.strip() for part in config.lora_include.split(",") if part.strip()]
+        excluded = [part.strip() for part in config.lora_exclude.split(",") if part.strip()]
+        full_included = [part.strip() for part in config.lora_full_include.split(",") if part.strip()]
         selected_modules = {}
+        full_modules = {}
         for name, child_module in orig_module.named_modules():
             name = name.replace(".checkpoint.", ".")
-            if not isinstance(child_module, Linear | Conv2d):
+            is_low_rank_layer = isinstance(child_module, Linear | Conv2d)
+            is_weighted_leaf = not any(child_module.children()) and isinstance(getattr(child_module, "weight", None), Parameter)
+            is_full = is_weighted_leaf and (any(part in name for part in full_included)
+                                            or (config.lora_all_layers and not is_low_rank_layer))
+            if not is_low_rank_layer and not is_full:
                 unsuitable.append(name)
                 continue
+            if included and not any(part in name for part in included):
+                deselected.append(name)
+                continue
+            if any(part in name for part in excluded) or sum(p.numel() for p in child_module.parameters()) < config.lora_parameter_threshold:
+                deselected.append(name)
+                continue
+            # ai-toolkit uses the linear rank for 1x1 convolutions, the conv rank for larger kernels.
+            is_large_conv = isinstance(child_module, Conv2d) and child_module.kernel_size != (1, 1)
+            if is_large_conv and config.lora_conv_rank == 0 and not is_full:
+                deselected.append(name)
+                continue
             if len(self.module_filters) == 0 or any(f.matches(name) for f in self.module_filters):
-                selected_modules[name] = child_module
+                (full_modules if is_full else selected_modules)[name] = child_module
                 selected.append(name)
             else:
                 deselected.append(name)
@@ -965,6 +1147,8 @@ class LoRAModuleWrapper:
         # discovered qkv fusion groups, retained for the load-time fused/split match check regardless of
         # whether they are built fused. With no fusion_spec this is empty -> the loop below builds only
         # individual (split) modules.
+        # Full deltas remain split weight tensors; reject fused export contracts before training starts.
+        check_fusion_match([f"{self.prefix}.{name}.diff" for name in full_modules], self.fuse, self.fusion_spec)
         self.fused_groups = discover_fused_groups(self.fusion_spec, selected_modules, self.fuse)
         # when fusing, each complete group becomes one fused module (ORIGINAL/COMFY); its leaves are then
         # excluded from individual creation. When not fusing, the leaves stay individual (split) modules.
@@ -983,11 +1167,25 @@ class LoRAModuleWrapper:
             if name in consumed:
                 continue
             prefixed_name = (self.prefix + "." + name) if self.prefix != "" else name
-            lora_module = self.klass(prefixed_name, child_module, *self.additional_args, **self.additional_kwargs)
+            module_args = self.additional_args
+            if self.peft_type in (PeftType.LORA, PeftType.LOHA) and isinstance(child_module, Conv2d) and child_module.kernel_size != (1, 1):
+                module_args = [config.lora_conv_rank if config.lora_conv_rank is not None else self.rank,
+                               config.lora_conv_alpha if config.lora_conv_alpha is not None else self.alpha]
+            lora_module = self.klass(prefixed_name, child_module, *module_args, **self.additional_kwargs)
             lora_modules[name] = lora_module
             if self.peft_type == PeftType.OFT_2 and lora_module.adjustment_info:
                 old, new = lora_module.adjustment_info
                 oft_adjustments.append({'old': old, 'new': new})
+
+        for name, child_module in full_modules.items():
+            prefixed_name = (self.prefix + "." + name) if self.prefix else name
+            lora_modules[name] = FullDeltaModule(prefixed_name, child_module)
+
+        if self.peft_type == PeftType.LORA and not config.lora_decompose:
+            for module in lora_modules.values():
+                adapter = module.module if isinstance(module, FusedModuleGroup) else module
+                adapter.rank_dropout = config.lora_rank_dropout
+                adapter.module_dropout = config.lora_module_dropout
 
         if oft_adjustments:
             summary = defaultdict(int)
@@ -1083,6 +1281,10 @@ class LoRAModuleWrapper:
 
         # Temporarily re-create the state dict, so we can see what keys were left.
         remaining_names = set(state_dict) - set(self.state_dict())
+        for module in self.lora_modules.values():
+            adapter = module.module if isinstance(module, FusedModuleGroup) else module
+            if isinstance(adapter, FullRankModule):
+                remaining_names.discard(adapter.prefix + "diff")
 
         # create dummy modules for the remaining keys
         for name in remaining_names:
@@ -1090,6 +1292,11 @@ class LoRAModuleWrapper:
                 prefix = name.removesuffix(".alpha")
                 module = self.dummy_klass(prefix, None, *self.additional_args, **self.additional_kwargs)
                 module.load_state_dict(state_dict)
+                self.lora_modules[prefix] = module
+            elif name.endswith(".diff"):
+                prefix = name.removesuffix(".diff")
+                module = FullDeltaModule.make_dummy()(prefix, None)
+                module.load_state_dict({k: v for k, v in state_dict.items() if k.startswith(prefix + ".")})
                 self.lora_modules[prefix] = module
 
     def state_dict(self) -> dict:

@@ -5,6 +5,7 @@ import os
 import shutil
 import traceback
 from collections.abc import Callable
+from itertools import count
 from pathlib import Path
 
 import modules.util.multi_gpu_util as multi
@@ -128,8 +129,10 @@ class GenericTrainer(BaseTrainer):
 
         self.callbacks.on_update_status("loading the model")
 
-        if self.config.quantization.cache_dir is None:
-            self.config.quantization.cache_dir = self.config.cache_dir + "/quantization"
+        # quantization.cache_dir is not exposed in the UI and has no legitimate way to
+        # diverge from cache_dir, but a None-guard here meant a stale value survived
+        # config duplication (e.g. Save As) instead of following the new cache_dir.
+        self.config.quantization.cache_dir = self.config.cache_dir + "/quantization"
         os.makedirs(self.config.quantization.cache_dir, exist_ok=True)
 
         self.model = self.model_loader.load(
@@ -637,9 +640,13 @@ class GenericTrainer(BaseTrainer):
         accumulated_loss = torch.tensor(0.0, device=train_device)
         ema_loss = None
         ema_loss_steps = 0
-        epochs = range(train_progress.epoch, self.config.epochs, 1)
+        # An explicit update budget takes precedence over epoch estimates, even after AMP skips.
+        epochs = (count(train_progress.epoch) if self.config.max_train_steps
+                  else range(train_progress.epoch, self.config.epochs))
 
         for _epoch in tqdm(epochs, desc="epoch") if multi.is_master() else epochs:
+            if self.config.reached_max_train_steps(train_progress.optimizer_step):
+                return
             multi.sync_commands(self.commands)
             if self.commands.get_stop_command():
                 return
@@ -678,10 +685,13 @@ class GenericTrainer(BaseTrainer):
                     approximate_epoch_length=self.data_loader.get_data_set().approximate_length(),
                     batch_size=self.config.batch_size,
                     gradient_accumulation_steps=self.config.gradient_accumulation_steps,
-                    global_step=train_progress.global_step
+                    global_step=train_progress.global_step,
+                    optimizer_step=train_progress.optimizer_step,
                 )
 
             current_epoch_length = self.data_loader.get_data_set().approximate_length()
+            if self.config.max_train_steps and current_epoch_length <= 0:
+                raise ValueError("Cannot reach Max Updates: the training dataset contains no batches")
 
             if multi.is_master():
                 batches = step_tqdm = tqdm(self.data_loader.get_data_loader(), desc="step", total=current_epoch_length,
@@ -773,6 +783,7 @@ class GenericTrainer(BaseTrainer):
                         else:
                             multi.reduce_grads_mean(self.parameters, self.config.gradient_reduce_precision)
 
+                        scale_before = scaler.get_scale() if scaler else None
                         if scaler and self.config.optimizer.optimizer.supports_fused_back_pass() and self.config.optimizer.fused_back_pass:
                             scaler.step_after_unscale_parameter_(self.model.optimizer)
                             scaler.update()
@@ -787,7 +798,11 @@ class GenericTrainer(BaseTrainer):
                                 nn.utils.clip_grad_norm_(self.parameters, self.config.clip_grad_norm)
                             self.model.optimizer.step()
 
-                        lr_scheduler.step()  # done before zero_grad, because some lr schedulers need gradients
+                        # AMP overflow skips the optimizer step; it must not consume the update budget or LR schedule.
+                        optimizer_updated = scaler is None or scaler.get_scale() >= scale_before
+                        if optimizer_updated:
+                            train_progress.next_optimizer_step()
+                            lr_scheduler.step()  # before zero_grad because some schedulers need gradients
                         self.model.optimizer.zero_grad(set_to_none=True)
                         has_gradient = False
 
@@ -834,6 +849,10 @@ class GenericTrainer(BaseTrainer):
 
                 train_progress.next_step(self.config.batch_size)
                 self.callbacks.on_update_train_progress(train_progress, current_epoch_length, self.config.epochs)
+
+                # Stop only at completed optimizer-update boundaries, so no accumulated gradients are discarded.
+                if self.config.reached_max_train_steps(train_progress.optimizer_step):
+                    return
 
                 if self.commands.get_stop_command():
                     return

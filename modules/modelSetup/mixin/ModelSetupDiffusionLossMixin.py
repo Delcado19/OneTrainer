@@ -1,6 +1,7 @@
 from abc import ABCMeta
 from collections.abc import Callable
 
+from modules.util.aitoolkit_timestep_weights import aitoolkit_bell_weights, aitoolkit_timestep_weights
 from modules.util.config.TrainConfig import TrainConfig
 from modules.util.DiffusionScheduleCoefficients import DiffusionScheduleCoefficients
 from modules.util.enum.LossWeight import LossWeight
@@ -32,6 +33,11 @@ class ModelSetupDiffusionLossMixin(metaclass=ABCMeta):
         loss = diff + torch.nn.functional.softplus(-2.0*diff) - torch.log(torch.full(size=diff.size(), fill_value=2.0, dtype=torch.float32, device=diff.device))
         return loss
 
+    @staticmethod
+    def __pseudo_huber_loss(pred: Tensor, target: Tensor) -> Tensor:
+        # ai-toolkit uses c=0.01, distinct from PyTorch's piecewise Huber loss.
+        return ((pred.float() - target.float()).square() + 0.01 ** 2).sqrt() - 0.01
+
     def __masked_losses(
             self,
             batch: dict,
@@ -42,6 +48,16 @@ class ModelSetupDiffusionLossMixin(metaclass=ABCMeta):
 
         mean_dim = list(range(1, data['predicted'].ndim))
 
+        if config.pseudo_huber_strength:
+            losses += masked_losses_with_prior(
+                losses=self.__pseudo_huber_loss(data['predicted'], data['target']) * data.get('element_loss_scale', 1),
+                prior_losses=self.__pseudo_huber_loss(data['predicted'], data['prior_target']) if 'prior_target' in data else None,
+                mask=batch['latent_mask'].float(),
+                unmasked_weight=config.unmasked_weight,
+                normalize_masked_area_loss=config.normalize_masked_area_loss,
+                masked_prior_preservation_weight=config.masked_prior_preservation_weight,
+            ).mean(mean_dim) * config.pseudo_huber_strength
+
         # MSE/L2 Loss
         if config.mse_strength != 0:
             losses += masked_losses_with_prior(
@@ -49,7 +65,7 @@ class ModelSetupDiffusionLossMixin(metaclass=ABCMeta):
                     data['predicted'].to(dtype=torch.float32),
                     data['target'].to(dtype=torch.float32),
                     reduction='none'
-                ),
+                ) * data.get('element_loss_scale', 1),
                 prior_losses=F.mse_loss(
                     data['predicted'].to(dtype=torch.float32),
                     data['prior_target'].to(dtype=torch.float32),
@@ -68,7 +84,7 @@ class ModelSetupDiffusionLossMixin(metaclass=ABCMeta):
                     data['predicted'].to(dtype=torch.float32),
                     data['target'].to(dtype=torch.float32),
                     reduction='none'
-                ),
+                ) * data.get('element_loss_scale', 1),
                 prior_losses=F.l1_loss(
                     data['predicted'].to(dtype=torch.float32),
                     data['prior_target'].to(dtype=torch.float32),
@@ -86,7 +102,7 @@ class ModelSetupDiffusionLossMixin(metaclass=ABCMeta):
                 losses=self.__log_cosh_loss(
                     data['predicted'].to(dtype=torch.float32),
                     data['target'].to(dtype=torch.float32)
-                ),
+                ) * data.get('element_loss_scale', 1),
                 prior_losses=self.__log_cosh_loss(
                     data['predicted'].to(dtype=torch.float32),
                     data['prior_target'].to(dtype=torch.float32)
@@ -105,7 +121,7 @@ class ModelSetupDiffusionLossMixin(metaclass=ABCMeta):
                     data['target'].to(dtype=torch.float32),
                     reduction='none',
                     delta=config.huber_delta,
-                ),
+                ) * data.get('element_loss_scale', 1),
                 prior_losses=F.huber_loss(
                     data['predicted'].to(dtype=torch.float32),
                     data['prior_target'].to(dtype=torch.float32),
@@ -145,6 +161,9 @@ class ModelSetupDiffusionLossMixin(metaclass=ABCMeta):
         losses = 0
 
         mean_dim = list(range(1, data['predicted'].ndim))
+
+        if config.pseudo_huber_strength:
+            losses += self.__pseudo_huber_loss(data['predicted'], data['target']).mean(mean_dim) * config.pseudo_huber_strength
 
         # MSE/L2 Loss
         if config.mse_strength != 0:
@@ -327,6 +346,10 @@ class ModelSetupDiffusionLossMixin(metaclass=ABCMeta):
                 losses = self.__unmasked_losses(batch, data, config)
 
         # Scale Losses by Batch and/or GA (if enabled)
+        if 'element_loss_scale' in data and not (
+                config.masked_training and not config.model_type.has_conditioning_image_input()):
+            # The t0 velocity-equivalent weight is constant over each sample's spatial dimensions.
+            losses *= data['element_loss_scale'].flatten(1)[:, 0].to(losses.device)
         losses = losses * config.loss_scaler.get_scale(config.batch_size, config.gradient_accumulation_steps)
         losses *= loss_weight
 
@@ -335,6 +358,17 @@ class ModelSetupDiffusionLossMixin(metaclass=ABCMeta):
             match config.loss_weight_fn:
                 case LossWeight.CONSTANT:
                     pass
+                case LossWeight.AI_TOOLKIT_WEIGHTED:
+                    if sigmas is None:
+                        raise ValueError("AI_TOOLKIT_WEIGHTED requires a flow timestep schedule")
+                    losses *= aitoolkit_timestep_weights(data['timestep'], sigmas.shape[0]).to(losses.device)
+                case LossWeight.AI_TOOLKIT_BELL | LossWeight.AI_TOOLKIT_HALF_BELL:
+                    if sigmas is None:
+                        raise ValueError("ai-toolkit bell weights require a flow timestep schedule")
+                    losses *= aitoolkit_bell_weights(
+                        data['timestep'], sigmas.shape[0],
+                        half_bell=config.loss_weight_fn == LossWeight.AI_TOOLKIT_HALF_BELL,
+                    ).to(losses.device)
                 case LossWeight.SIGMA:
                     losses *= self.__sigma_loss_weight(data['timestep'], losses.device)
                 case _:

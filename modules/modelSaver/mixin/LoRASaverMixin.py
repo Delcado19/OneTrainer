@@ -4,7 +4,8 @@ from pathlib import Path
 
 from modules.model.BaseModel import BaseModel
 from modules.modelSaver.mixin.DtypeModelSaverMixin import DtypeModelSaverMixin
-from modules.module.FusedModule import check_fusion_match
+from modules.module.FusedModule import FusedModuleGroup, check_fusion_match
+from modules.module.LoRAModule import FullRankModule
 from modules.util.convert_lora_util import (
     convert_lora_suffix_ab,
     convert_to_diffusers,
@@ -44,6 +45,25 @@ class LoRASaverMixin(
     ) -> dict[str, Tensor]:
         pass
 
+    def _get_export_state_dict(self, model: BaseModel) -> dict[str, Tensor]:
+        state = dict(self._get_state_dict(model))
+        for wrapper in model.adapters():
+            for module in wrapper.lora_modules.values():
+                adapter = module.module if isinstance(module, FusedModuleGroup) else module
+                if isinstance(adapter, FullRankModule):
+                    down_key = adapter.prefix + "lora_down.weight"
+                    if down_key in state:
+                        # A dense identity-up adapter is a full delta, not an incomplete A/B LoRA file.
+                        state[adapter.prefix + "diff"] = state.pop(down_key) * state.pop(adapter.prefix + "alpha") / adapter.rank
+        # Fold LoCON's learned gate for external readers; raw internal backups preserve optimizer resume.
+        for key in list(state):
+            if key.endswith(".scalar"):
+                up_key = key.removesuffix(".scalar") + ".lora_up.weight"
+                if up_key not in state:
+                    raise ValueError(f"LoCON scalar has no matching up projection: {key}")
+                state[up_key] = state[up_key] * state.pop(key)
+        return state
+
     def _write_lora_file(
             self,
             model: BaseModel,
@@ -61,7 +81,7 @@ class LoRASaverMixin(
     def _save_diffusers(self, model: BaseModel, destination: str, dtype: torch.dtype | None):
         # DIFFUSERS format: HF diffusers convention (not the peft library's native layout).
         # Key-set-free (canonical == diffusers namespace).
-        state_dict = self._get_state_dict(model)
+        state_dict = self._get_export_state_dict(model)
         save_state_dict = self._convert_state_dict_dtype(state_dict, dtype)
         save_state_dict = convert_to_diffusers(save_state_dict)
         self._write_lora_file(model, destination, save_state_dict)
@@ -76,7 +96,7 @@ class LoRASaverMixin(
         return kohya_flatten(state_dict)
 
     def _save_kohya(self, model: BaseModel, destination: str, dtype: torch.dtype | None):
-        state_dict = self._get_state_dict(model)
+        state_dict = self._get_export_state_dict(model)
         save_state_dict = self._convert_state_dict_dtype(state_dict, dtype)
         save_state_dict = self._convert_kohya(model, save_state_dict)
         self._write_lora_file(model, destination, save_state_dict)
@@ -91,13 +111,13 @@ class LoRASaverMixin(
             f"The LEGACY LoRA output format is not supported for {model.model_type}.")
 
     def _save_legacy(self, model: BaseModel, destination: str, dtype: torch.dtype | None):
-        state_dict = self._get_state_dict(model)
+        state_dict = self._get_export_state_dict(model)
         save_state_dict = self._convert_state_dict_dtype(state_dict, dtype)
         save_state_dict = self._convert_legacy(model, save_state_dict)
         self._write_lora_file(model, destination, save_state_dict)
 
     def _save_original(self, model: BaseModel, destination: str, dtype: torch.dtype | None):
-        state_dict = self._get_state_dict(model)
+        state_dict = self._get_export_state_dict(model)
         # ORIGINAL puts the denoising model at the top level with no prefix, which leaves no namespace for a
         # second component: a trained text encoder (or bundled embeddings) would have to sit under its own
         # prefix alongside the unprefixed denoising keys, an asymmetric layout no external tool reads. Refuse
@@ -121,7 +141,7 @@ class LoRASaverMixin(
 
     def _save_comfy(self, model: BaseModel, destination: str, dtype: torch.dtype | None):
         conversion = lora_original_conversion(model, model.lora_diffusers_to_comfy())
-        state_dict = self._get_state_dict(model)
+        state_dict = self._get_export_state_dict(model)
         save_state_dict = self._convert_state_dict_dtype(state_dict, dtype)
         save_state_dict = convert(save_state_dict, conversion, strict=True)
         # COMFY needs a Comfy-native "text_encoders.<prefix>" name for every trained text encoder, or Comfy
@@ -164,7 +184,7 @@ class LoRASaverMixin(
     ):
         # INTERNAL is the raw canonical dict, not a foreign format with a fixed fused/split shape -- exempt.
         if output_model_format != ModelFormat.INTERNAL:
-            state_dict = self._get_state_dict(model)
+            state_dict = self._get_export_state_dict(model)
             check_fusion_match(state_dict.keys(), output_model_format.needs_qkv_fusion(), model.fusion_groups())
 
         match output_model_format:

@@ -27,6 +27,7 @@ class BaseModelLoader(metaclass=ABCMeta):
                 epoch_step=meta['train_progress']['epoch_step'],
                 epoch_sample=meta['train_progress']['epoch_sample'],
                 global_step=meta['train_progress']['global_step'],
+                optimizer_step=meta['train_progress'].get('optimizer_step'),
             )
 
         # optimizer

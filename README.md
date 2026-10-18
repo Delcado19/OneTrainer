@@ -33,6 +33,11 @@ OneTrainer is a one-stop solution for all your Diffusion training needs.
 
 ## Installation
 
+This development branch includes additional ai-toolkit adapter and Z-Image
+training controls. See [ai-toolkit LoRA compatibility](docs/AiToolkitParity.md)
+for the implemented options, supported recipe importer, validation and remaining
+limits. Complete framework parity has not yet been established.
+
 > [!IMPORTANT]
 > Installing OneTrainer requires Python >=3.10 and <3.14.
 > You can download Python at https://www.python.org/downloads/windows/.

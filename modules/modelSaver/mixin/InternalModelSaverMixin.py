@@ -38,5 +38,6 @@ class InternalModelSaverMixin(metaclass=ABCMeta):
                     'epoch_step': model.train_progress.epoch_step,
                     'epoch_sample': model.train_progress.epoch_sample,
                     'global_step': model.train_progress.global_step,
+                    'optimizer_step': model.train_progress.optimizer_step,
                 },
             }, meta_file)

@@ -73,6 +73,24 @@ class BaseLoraTabView:
                                   tooltip=f"Bundles any additional embeddings into the {name} output file, rather than as separate files")
             self.components.switch(master, 5, 1, ui_state, "bundle_additional_embeddings")
 
+            if peft_type == PeftType.LORA:
+                for row, label, field in (
+                    (7, "Full-Rank Adapter", "lora_full_rank"),
+                    (8, "LoCON", "lora_locon"),
+                    (9, "LoCON CP Convolution", "lora_use_cp"),
+                    (10, "Full Delta on Other Layers", "lora_all_layers"),
+                ):
+                    self.components.label(master, row, 3, label)
+                    self.components.switch(master, row, 4, ui_state, field)
+                for row, label, field, tooltip in (
+                    (7, "Rank Dropout", "lora_rank_dropout", "Randomly omit adapter rank channels during training; plain LoRA only."),
+                    (8, "Module Dropout", "lora_module_dropout", "Randomly omit the entire adapter contribution during training; plain LoRA only."),
+                    (9, "Conv Rank", "lora_conv_rank", "Leave unset to use the main rank; 0 excludes convolution adapters."),
+                    (10, "Conv Alpha", "lora_conv_alpha", "Leave unset to use the main alpha."),
+                ):
+                    self.components.label(master, row, 0, label, tooltip=tooltip)
+                    self.components.entry(master, row, 1, ui_state, field)
+
         # OFTv2
         elif peft_type == PeftType.OFT_2:
             # Block Size
@@ -162,3 +180,14 @@ class BaseLoraTabView:
             self.components.label(master, 6, 3, "Bundle Embeddings",
                                   tooltip=f"Bundles any additional embeddings into the {name} output file, rather than as separate files")
             self.components.switch(master, 6, 4, ui_state, "bundle_additional_embeddings")
+
+        for row, label, field, tooltip in (
+            (11, "Include Substrings", "lora_include", "Comma-separated module name substrings; applied in addition to the training layer filter."),
+            (12, "Exclude Substrings", "lora_exclude", "Comma-separated module name substrings; exclusions take precedence."),
+            (13, "Minimum Module Parameters", "lora_parameter_threshold", "Skip modules below this parameter count; 0 disables the threshold."),
+            (14, "Full Delta Substrings", "lora_full_include", "Train full weight/bias deltas on matching leaves instead of low-rank projections; requires a native adapter format."),
+        ):
+            if field == "lora_full_include" and peft_type != PeftType.LORA:
+                continue
+            self.components.label(master, row, 0, label, tooltip=tooltip)
+            self.components.entry(master, row, 1, ui_state, field)
