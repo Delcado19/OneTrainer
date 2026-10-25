@@ -1,10 +1,10 @@
 import unittest
 from types import SimpleNamespace
 
-import torch
-
 from modules.modelSetup.mixin.ModelSetupNoiseMixin import ModelSetupNoiseMixin
 from modules.util.enum.TimestepDistribution import TimestepDistribution
+
+import torch
 
 
 class _NoiseMixinHarness(ModelSetupNoiseMixin):

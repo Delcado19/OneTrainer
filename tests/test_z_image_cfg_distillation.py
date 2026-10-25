@@ -1,13 +1,14 @@
-import tempfile
 import sys
+import tempfile
 import types
 import unittest
 from contextlib import nullcontext
 from pathlib import Path
 
 import torch
-from safetensors.torch import save_file
 from torch import nn
+
+from safetensors.torch import save_file
 
 
 def _install_external_stubs():
