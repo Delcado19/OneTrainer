@@ -4,6 +4,9 @@ This branch ports concrete ai-toolkit behaviors into OneTrainer. It is not a cla
 that every ai-toolkit trainer, model architecture or optimizer trajectory is now
 reproduced. The reference is the adjacent local ai-toolkit checkout at commit
 `b36bb3998ae596a566d85513299696a3a78f0dcb`; archived Screen I used version 0.13.5.
+Re-verified against upstream commit `73ebae1` (2026-10-25): no change to any
+code path this document claims parity with. See
+[upstream re-verification](../notes/aitoolkit_upstream_reverification_2026-10-25.md).
 
 ## Available adapter controls
 
