@@ -125,6 +125,7 @@ def path_entry(
         required: bool = False,
         columnspan: int = 1,
         placeholder: str = "",
+        allow_repo_filename: bool = False,
 ):
     frame = ctk.CTkFrame(master, fg_color="transparent")
     frame.grid(row=row, column=column, padx=0, pady=0, sticky="new", columnspan=columnspan)
@@ -132,7 +133,7 @@ def path_entry(
     frame.grid_columnconfigure(0, weight=1)
 
     def _path_validator_factory(comp, var, state, name, **kw):
-        return PathValidator(comp, var, state, name, io_type=io_type, **kw)
+        return PathValidator(comp, var, state, name, io_type=io_type, allow_repo_filename=allow_repo_filename, **kw)
 
     entry_component = entry(
         frame, row=0, column=0, ui_state=ui_state, var_name=var_name,
@@ -460,12 +461,12 @@ def options_adv(master, row, column, values, ui_state: CtkUIState, var_name: str
 
 
 def options_kv(master, row, column, values: list[tuple[str, Any]], ui_state: CtkUIState, var_name: str,
-               command: Callable[[Any], None] | None = None, sticky=None):
+               command: Callable[[Any], None] | None = None, sticky=None, reset_to_first_on_mismatch: bool = True):
     var = ui_state.get_var(var_name)
     keys = [key for key, value in values]
 
     # if the current value is not valid, select the first option
-    if var.get() not in [str(value) for key, value in values] and len(keys) > 0:
+    if var.get() not in [str(value) for key, value in values] and len(keys) > 0 and reset_to_first_on_mismatch:
         var.set(values[0][1])
 
     deactivate_update_var = False

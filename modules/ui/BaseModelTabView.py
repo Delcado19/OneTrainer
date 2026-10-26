@@ -203,7 +203,8 @@ class BaseModelTabView(ABC):
                                  wide_tooltip=True)
                 self.components.path_entry(
                     frame, row, 1, ui_state, "assistant_lora_model_name",
-                    mode="file", path_modifier=path_util.json_path_modifier
+                    mode="file", path_modifier=path_util.json_path_modifier,
+                    allow_repo_filename=True,
                 )
 
             row += 1

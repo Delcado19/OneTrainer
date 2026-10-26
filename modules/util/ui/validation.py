@@ -31,7 +31,7 @@ if _IS_WINDOWS:
     _INVALID_CHARS |= set('<>"|?*')
 
 
-def _is_huggingface_repo_or_file(value: str) -> bool:
+def _is_huggingface_repo_or_file(value: str, *, allow_repo_filename: bool = False) -> bool:
     trimmed = value.strip()
 
     if trimmed.startswith("https://"):
@@ -53,10 +53,21 @@ def _is_huggingface_repo_or_file(value: str) -> bool:
         return False
     if len(trimmed) >= 2 and trimmed[1] == ":" and trimmed[0].isalpha():
         return False
-    # "org/repo" (model/repo reference) or "org/repo/filename.ext" (the
-    # repo_id/filename form ZImageModelLoader.__assistant_lora_path parses
-    # with rsplit("/", 1)) — anything else isn't a plain HF reference.
-    if trimmed.count("/") not in (1, 2):
+
+    slash_count = trimmed.count("/")
+    if allow_repo_filename:
+        # "org/repo" (model/repo reference) or "org/repo/filename.ext" (the
+        # repo_id/filename form ZImageModelLoader.__assistant_lora_path parses
+        # with rsplit("/", 1)). Only opt in per-field (see assistant_lora_model_name
+        # in BaseModelTabView.py): accepting the 2-slash form everywhere would also
+        # wave through an ordinary nonexistent 2-segment relative path (e.g.
+        # "models/my/file.safetensors") in every other HF-reference field, skipping
+        # the existence check they're supposed to get.
+        if slash_count not in (1, 2):
+            return False
+        if slash_count == 2 and not ENDS_WITH_EXT.search(trimmed):
+            return False
+    elif slash_count != 1:
         return False
 
     return bool(HUGGINGFACE_REPO_RE.match(trimmed))
@@ -83,6 +94,7 @@ def validate_path(
     *,
     prevent_overwrites: bool = False,
     output_format: str | None = None,
+    allow_repo_filename: bool = False,
 ) -> str | None:
     """Return an error string if *value* is an invalid path, else ``None``."""
     trimmed = value.strip()
@@ -104,7 +116,7 @@ def validate_path(
             return "Cloud path must use forward slashes (/)"
         return None
 
-    if io_type == PathIOType.INPUT and _is_huggingface_repo_or_file(trimmed):
+    if io_type == PathIOType.INPUT and _is_huggingface_repo_or_file(trimmed, allow_repo_filename=allow_repo_filename):
         return None
 
     if io_type == PathIOType.INPUT:
@@ -261,7 +273,9 @@ def flush_and_validate_all() -> list[str]:
     return invalid
 
 
-def _validate_path_field(ui_state: BaseUIState, io_type: PathIOType, value: str) -> str | None:
+def _validate_path_field(
+    ui_state: BaseUIState, io_type: PathIOType, value: str, *, allow_repo_filename: bool = False,
+) -> str | None:
     try:
         prevent_var = ui_state.get_var("prevent_overwrites")
     except (KeyError, AttributeError):
@@ -275,4 +289,5 @@ def _validate_path_field(ui_state: BaseUIState, io_type: PathIOType, value: str)
         io_type=io_type,
         prevent_overwrites=prevent_var.get() if prevent_var is not None else False,
         output_format=format_var.get() if format_var is not None else None,
+        allow_repo_filename=allow_repo_filename,
     )
