@@ -65,6 +65,14 @@ class TrainUIController:
 
         remaining_steps = (max_epoch - train_progress.epoch - 1) * max_step + (max_step - train_progress.epoch_step)
 
+        # max_train_steps (ai-toolkit parity, fork-only) can end training before max_epoch is
+        # reached. Without this, the ETA always extrapolates against epochs/max_epoch even when
+        # max_train_steps is the real, earlier stop condition - producing wildly inflated ETAs.
+        if self.train_config.max_train_steps and train_progress.optimizer_step is not None:
+            remaining_optimizer_steps = self.train_config.max_train_steps - train_progress.optimizer_step
+            remaining_dataloader_steps = remaining_optimizer_steps * self.train_config.gradient_accumulation_steps
+            remaining_steps = max(0, min(remaining_steps, remaining_dataloader_steps))
+
         if steps_done_this_session <= 30:
             return "Estimating ..."
 
