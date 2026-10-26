@@ -1,3 +1,4 @@
+import os
 from abc import abstractmethod
 from collections.abc import Callable
 
@@ -112,7 +113,10 @@ class BaseTopBarView:
         self.__create_training_method()
 
     def __load_config(self):
-        self._show_open_dialog("training_configs", self.__load_current_config)
+        # lora-training repo is the canonical config location for this checkout;
+        # falls back to the local training_configs/ dir if it isn't there.
+        initial_dir = "D:/LoRA-Training/configs" if os.path.isdir("D:/LoRA-Training/configs") else "training_configs"
+        self._show_open_dialog(initial_dir, self.__load_current_config)
 
     def __save_config(self):
         self._show_save_dialog("training_configs", self.controller.save_config_to_path)

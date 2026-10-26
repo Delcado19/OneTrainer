@@ -51,6 +51,29 @@ class BaseConfigListView(ABC):
     def _refresh_show_disabled_text(self):
         return
 
+    def reload_from_config(self):
+        """Re-sync this list's dropdown options and element list with the
+        current train_config (e.g. after "Load config").
+
+        The dropdown options, the element list and its widgets are all
+        snapshotted once in build() and never re-derive themselves on
+        their own. Without an explicit reload here, this tab keeps showing
+        whatever was loaded at build() time even after train_config.attr_name
+        points at a different file — and the next save_current_config()
+        then silently overwrites that *new* file with this tab's stale
+        element list.
+        """
+        if not self.from_external_file:
+            self.current_config = getattr(self.controller.train_config, self.attr_name)
+            self.widgets_initialized = False
+            self._create_element_list()
+            return
+
+        self.configs = []
+        self.__load_available_config_names()
+        self.__load_current_config(getattr(self.controller.train_config, self.attr_name))
+        self.__create_configs_dropdown()
+
     def build(
             self,
             master,

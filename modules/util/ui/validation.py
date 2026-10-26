@@ -23,7 +23,7 @@ ERROR_BORDER_COLOR = "#dc3545"
 
 TRAILING_SLASH_RE = re.compile(r"[\\/]$")
 ENDS_WITH_EXT = re.compile(r"\.[A-Za-z0-9]+$")
-HUGGINGFACE_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+HUGGINGFACE_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?$")
 
 _INVALID_CHARS = {chr(c) for c in range(32)}
 _IS_WINDOWS = sys.platform == "win32"
@@ -53,7 +53,10 @@ def _is_huggingface_repo_or_file(value: str) -> bool:
         return False
     if len(trimmed) >= 2 and trimmed[1] == ":" and trimmed[0].isalpha():
         return False
-    if trimmed.count("/") != 1:
+    # "org/repo" (model/repo reference) or "org/repo/filename.ext" (the
+    # repo_id/filename form ZImageModelLoader.__assistant_lora_path parses
+    # with rsplit("/", 1)) — anything else isn't a plain HF reference.
+    if trimmed.count("/") not in (1, 2):
         return False
 
     return bool(HUGGINGFACE_REPO_RE.match(trimmed))
